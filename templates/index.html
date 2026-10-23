@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Packet Analyzer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .packet-row { cursor: pointer; }
+        .packet-row:hover { outline: 2px solid #d12027; outline-offset: -2px; }
+        .packet-row.selected { background: rgba(209,32,39,.10); }
+        .inspection-backdrop { position: fixed; inset: 0; background: rgba(10,15,25,.45); z-index: 1000; display: none; }
+        .inspection-backdrop.open { display: block; }
+        .inspection-panel { position: fixed; z-index: 1001; top: 0; right: 0; height: 100dvh; width: min(760px, 94vw); background: #fff; color: #1c2430; box-shadow: -12px 0 36px rgba(0,0,0,.22); transform: translateX(105%); transition: transform .22s ease; display: flex; flex-direction: column; }
+        .inspection-panel.open { transform: translateX(0); }
+        .inspection-head { padding: 18px 20px; border-bottom: 1px solid #dce1e8; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+        .inspection-head h2 { margin: 0 0 6px; font-size: 1.25rem; }
+        .inspection-head p { margin: 0; overflow-wrap: anywhere; color: #5c6675; font-size: .9rem; }
+        .inspection-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 20px; border-bottom: 1px solid #dce1e8; }
+        .inspection-actions button { cursor: pointer; border: 1px solid #cbd2dc; border-radius: 7px; background: #f7f8fa; color: #1c2430; padding: 8px 11px; }
+        .inspection-content { overflow: auto; padding: 16px 20px 28px; }
+        .inspection-content h3 { margin: 20px 0 10px; font-size: 1rem; }
+        .inspection-content h3:first-child { margin-top: 0; }
+        .inspection-meta { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+        .inspection-meta div { background: #f4f6f8; border: 1px solid #e1e5eb; border-radius: 8px; padding: 9px 10px; min-width: 0; }
+        .inspection-meta strong { display: block; color: #596575; font-size: .76rem; margin-bottom: 4px; }
+        .inspection-meta span { overflow-wrap: anywhere; font-size: .9rem; }
+        .layer-card { border: 1px solid #dce1e8; border-radius: 9px; margin-bottom: 10px; overflow: hidden; }
+        .layer-card summary { cursor: pointer; font-weight: 700; background: #f4f6f8; padding: 11px 13px; }
+        .layer-card .layer-body { padding: 10px 13px; }
+        .field-table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+        .field-table th, .field-table td { text-align: left; vertical-align: top; padding: 7px 8px; border-bottom: 1px solid #e7eaf0; overflow-wrap: anywhere; }
+        .field-table th { width: 34%; color: #596575; }
+        .code-block { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; background: #101722; color: #e7edf5; border-radius: 8px; padding: 12px; font: 12px/1.55 Consolas, Monaco, monospace; }
+        .hex-table { width: 100%; border-collapse: collapse; font: 12px/1.5 Consolas, Monaco, monospace; }
+        .hex-table td { padding: 3px 5px; border-bottom: 1px solid #edf0f4; vertical-align: top; }
+        .hex-table td:first-child { color: #697586; width: 50px; }
+        .hex-table td:nth-child(2) { overflow-wrap: anywhere; }
+        .hex-table td:last-child { color: #5a6574; white-space: pre; }
+        .inspection-error { padding: 12px; background: #fff0f0; color: #8b1515; border-radius: 8px; }
+        .inspection-loading { color: #596575; padding: 12px 0; }
+        .analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 12px 0 20px; }
+        .analytics-card { min-width: 0; border: 1px solid #e1e5eb; border-radius: 10px; padding: 14px; background: #fff; }
+        .analytics-card h4 { margin: 0 0 8px; }
+        .analytics-chart { height: 260px; position: relative; }
+        .analytics-note { color: #687385; font-size: .86rem; margin: 6px 0 0; }
+        .security-alert-list { display: grid; gap: 10px; margin: 12px 0 4px; }
+        .security-alert { border: 1px solid #dce1e8; border-left: 5px solid #718096; border-radius: 8px; padding: 12px 14px; background: #fff; }
+        .security-alert.warning { border-left-color: #d97706; background: #fffaf0; }
+        .security-alert.info { border-left-color: #2563eb; background: #f5f9ff; }
+        .security-alert h4 { margin: 0 0 5px; }
+        .security-alert p { margin: 0; overflow-wrap: anywhere; }
+        .security-alert .alert-meta { color: #687385; font-size: .78rem; margin-top: 6px; }
+        @media (max-width: 760px) { .analytics-grid { grid-template-columns: 1fr; } }
+        @media (max-width: 600px) { .inspection-meta { grid-template-columns: 1fr; } .inspection-content { padding: 12px; } .inspection-head { padding: 14px 12px; } .inspection-actions { padding: 10px 12px; } }
+
+        :root {
+            color-scheme: light;
+            --ui-page: #f2f7fd;
+            --ui-white: #ffffff;
+            --ui-blue-soft: #eaf4ff;
+            --ui-blue-line: #d5e5f5;
+            --ui-blue: #2474c8;
+            --ui-blue-dark: #155da8;
+            --ui-ink: #19324d;
+            --ui-muted: #62768b;
+            --ui-orange: #f0a04b;
+            --ui-orange-soft: #fff4e7;
+            --ui-shadow: 0 8px 24px rgba(37, 91, 143, .075);
+        }
+        html { scroll-behavior: smooth; scroll-padding-top: 76px; }
+        body { background: var(--ui-page); color: var(--ui-ink); font-family: Inter, "Segoe UI", Arial, sans-serif; }
+        header { background: linear-gradient(115deg, #fff 0%, #e8f3ff 78%, #fff3e4 100%); color: var(--ui-ink); border-bottom: 1px solid var(--ui-blue-line); padding: 24px clamp(16px, 4vw, 48px); }
+        header h1 { color: #174b7d; letter-spacing: -.035em; }
+        header p { color: var(--ui-muted); }
+        header .status { display: inline-flex; align-items: center; background: #e7f7ef; color: #176b4d; border: 1px solid #bde7d3; border-radius: 999px; padding: 8px 12px; font-size: .84rem; white-space: nowrap; }
+        .app-nav { position: sticky; top: 0; z-index: 50; display: flex; flex-wrap: wrap; gap: 6px; padding: 10px clamp(12px, 4vw, 48px); background: rgba(255,255,255,.96); backdrop-filter: blur(12px); border-bottom: 1px solid var(--ui-blue-line); box-shadow: 0 4px 14px rgba(37,91,143,.05); }
+        .app-nav a { color: #28577f; text-decoration: none; font-size: .9rem; font-weight: 650; padding: 9px 13px; border-radius: 9px; transition: background .18s, color .18s; }
+        .app-nav a:hover, .app-nav a:focus-visible { color: var(--ui-blue-dark); background: var(--ui-blue-soft); outline: 2px solid #b9d9f8; outline-offset: 1px; }
+        main { max-width: 1600px; margin: 0 auto; padding: clamp(14px, 3vw, 32px); }
+        .panel, .card, .analytics-card { background: var(--ui-white); border: 1px solid var(--ui-blue-line); border-radius: 16px; box-shadow: var(--ui-shadow); }
+        .panel { padding: clamp(16px, 2.2vw, 26px); margin-bottom: 24px; scroll-margin-top: 76px; }
+        .panel h2 { color: #1c507f; letter-spacing: -.02em; }
+        .panel h3 { color: #2c587e; margin-top: 24px; }
+        .cards { gap: 14px; }
+        .card { padding: 17px 18px; min-width: 0; }
+        .card p { color: var(--ui-muted); }
+        .card h2 { color: var(--ui-blue-dark); overflow-wrap: anywhere; }
+        .card:nth-child(4) { border-top: 3px solid var(--ui-orange); }
+        label { color: #365a79; font-weight: 650; }
+        select, input { max-width: 100%; background: #fbfdff; color: var(--ui-ink); border: 1px solid #c9d9e9; border-radius: 9px; padding: 10px 12px; }
+        select:focus, input:focus { outline: 3px solid #c8e2ff; border-color: var(--ui-blue); }
+        button, .export-link { border-radius: 9px !important; font-weight: 650; transition: transform .15s, box-shadow .15s, background .15s; }
+        button:hover:not(:disabled), .export-link:hover { transform: translateY(-1px); box-shadow: 0 5px 12px rgba(29,95,155,.13); }
+        button:disabled { opacity: .55; cursor: not-allowed; }
+        .primary-button { background: var(--ui-blue) !important; border-color: var(--ui-blue) !important; color: #fff !important; }
+        .primary-button:hover:not(:disabled) { background: var(--ui-blue-dark) !important; }
+        .stop-button { background: var(--ui-orange) !important; border-color: var(--ui-orange) !important; color: #452600 !important; }
+        .export-link { background: var(--ui-blue-soft) !important; border: 1px solid #bdd8f3 !important; color: #1d5e9c !important; text-decoration: none; padding: 10px 14px; display: inline-flex; align-items: center; }
+        .reset-button { background: #fff !important; border: 1px solid #c9d9e9 !important; color: #365a79 !important; }
+        .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin: 14px 0; }
+        .notice { border: 1px solid #c7dff6; border-radius: 10px; background: #eef7ff; color: #24577e; padding: 11px 14px; }
+        .notice.error, .inspection-error { background: #fff0ef; border: 1px solid #f2c3bf; color: #a12f2a; }
+        .analytics-card { background: linear-gradient(180deg, #fff 0%, #fbfdff 100%); }
+        .analytics-card h4 { color: #315c80; }
+        .analytics-note, .interface-help { color: var(--ui-muted); }
+        .security-alert { border-radius: 12px; box-shadow: 0 3px 10px rgba(30,70,110,.04); }
+        .security-alert.info { border-color: #c9e1fa; border-left-color: #3984d6; background: #f1f8ff; }
+        .security-alert.warning { border-color: #f5d8ad; border-left-color: var(--ui-orange); background: #fff8ee; }
+        .security-alert.high, .security-alert.critical, .security-alert.error { border-color: #f0c4c4; border-left-color: #c83c43; background: #fff1f1; }
+        .security-alert.low { border-color: #c8eadb; border-left-color: #16845b; background: #f1fbf6; }
+        table { border-collapse: separate; border-spacing: 0; }
+        thead th { background: var(--ui-blue-soft); color: #28577f; }
+        tbody tr:nth-child(even) { background: #f8fbff; }
+        tbody tr:hover { background: #edf6ff; }
+        .packet-row:hover { outline-color: var(--ui-orange); }
+        .packet-row.selected { background: var(--ui-orange-soft); }
+        .inspection-panel { background: #fff; color: var(--ui-ink); border-left: 1px solid var(--ui-blue-line); }
+        .inspection-head, .inspection-actions { border-color: var(--ui-blue-line); background: #f7fbff; }
+        .inspection-head h2 { color: #1c507f; }
+        .layer-card { border-color: var(--ui-blue-line); }
+        .layer-card summary { background: #edf6ff; color: #28577f; }
+        .inspection-meta div { background: #f4f9ff; border-color: var(--ui-blue-line); }
+        .field-table th { color: #426786; }
+        @media (max-width: 760px) {
+            header { align-items: flex-start; gap: 12px; flex-direction: column; }
+            .app-nav { gap: 4px; }
+            .app-nav a { padding: 8px 10px; font-size: .84rem; }
+            .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .toolbar > * { max-width: 100%; }
+            .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            table { min-width: 720px; }
+        }
+        @media (max-width: 420px) {
+            .cards { grid-template-columns: 1fr; }
+            .app-nav { position: static; }
+            .inspection-panel { width: 100vw; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div><h1>Network Packet Analyzer</h1><p>Offline analysis and live network monitoring</p></div>
+    <span class="status">● Analyzer Ready</span>
+</header>
+<nav class="app-nav" aria-label="Main navigation">
+    <a href="#overview">Overview</a>
+    <a href="#live-capture">Live Capture</a>
+    <a href="#analytics">Analytics</a>
+    <a href="#security">Security</a>
+    <a href="#offline-packets">Offline Packets</a>
+</nav>
+<main>
+    {% if offline_error %}<section class="notice error">Offline PCAP error: {{ offline_error }}</section>{% endif %}
+    <section class="cards" id="overview">
+        <div class="card"><p>Offline Packets</p><h2>{{ summary.total_packets }}</h2></div>
+        <div class="card"><p>Offline Bytes</p><h2>{{ "{:,}".format(summary.total_bytes) }}</h2></div>
+        <div class="card"><p>Protocols</p><h2>{{ summary.protocol_count }}</h2></div>
+        <div class="card"><p>Average Packet Size</p><h2>{{ summary.average_packet_size }} B</h2></div>
+        <div class="card"><p>Largest Packet</p><h2>{{ summary.largest_packet }} B</h2></div>
+    </section>
+
+    <section class="panel" id="live-capture">
+        <h2>Live Network Capture</h2>
+        <p id="liveStatus" class="notice" aria-live="polite">Status: Connecting...</p>
+        <label for="interfaceSelect">Network Interface</label>
+        <select id="interfaceSelect">
+            {% for interface in interfaces %}
+            <option value="{{ interface.name }}" {% if interface.name == default_interface %}selected{% endif %}>
+                {% if interface.recommended %}★ RECOMMENDED — {% endif %}{{ interface.windows_name }} ({{ interface.status }}) — {{ interface.name }}
+            </option>
+            {% endfor %}
+        </select>
+        <p class="interface-help">Choose <strong>Wi-Fi (Up)</strong> for normal internet traffic. Loopback captures traffic local to this PC only. An adapter marked Disconnected or Not Present may not capture packets.</p>
+        <div class="toolbar">
+            <button type="button" id="startCapture" class="primary-button">Start Capture</button>
+            <button type="button" id="stopCapture" class="stop-button" disabled>Stop Capture</button>
+            <button type="button" id="refreshInterfaces" class="reset-button">Refresh Interfaces</button>
+        </div>
+        <p id="liveMessage" aria-live="polite">Select your network interface and start capturing.</p>
+        <section class="cards live-cards">
+            <div class="card"><p>Captured Packets</p><h2 id="liveCount">0</h2></div>
+            <div class="card"><p>Captured Bytes</p><h2 id="liveBytes">0</h2></div>
+            <div class="card"><p>Detected Protocols</p><h2 id="liveProtocolCount">0</h2></div>
+        </section>
+        <h3>Live Protocol Distribution</h3><div class="chart-container"><canvas id="liveChart"></canvas></div>
+        <h3 id="analytics">Live Traffic Analytics</h3>
+        <p class="analytics-note">Charts update automatically from the most recent 1,000 captured packets. Traffic-rate charts show the latest 30 seconds.</p>
+        <div class="analytics-grid">
+            <div class="analytics-card"><h4>Traffic over time</h4><div class="analytics-chart"><canvas id="trafficChart"></canvas></div><p class="analytics-note">Packets per second and bytes per second.</p></div>
+            <div class="analytics-card"><h4>Top source IP addresses</h4><div class="analytics-chart"><canvas id="topSourceChart"></canvas></div></div>
+            <div class="analytics-card"><h4>Top destination IP addresses</h4><div class="analytics-chart"><canvas id="topDestinationChart"></canvas></div></div>
+            <div class="analytics-card"><h4>Most active ports</h4><div class="analytics-chart"><canvas id="topPortsChart"></canvas></div><p class="analytics-note">Port labels include the detected protocol.</p></div>
+        </div>
+        <h3 id="security">Security Monitoring</h3>
+        <p class="analytics-note">Heuristic indicators from the latest 30 seconds of retained live traffic. Alerts are clues for review, not proof of malicious activity.</p>
+        <div id="securityAlerts" class="security-alert-list" aria-live="polite"><div class="security-alert"><p>No alerts evaluated yet. Start live capture to monitor traffic.</p></div></div>
+        <h3>Recent Live Packets <small>(click a row to inspect)</small></h3>
+        <div class="table-wrapper"><table>
+            <thead><tr><th>No.</th><th>Source IP</th><th>Destination IP</th><th>Protocol</th><th>Source Port</th><th>Destination Port</th><th>Size (bytes)</th></tr></thead>
+            <tbody id="livePacketTable"><tr><td colspan="7">No live packets captured yet.</td></tr></tbody>
+        </table></div>
+    </section>
+
+    <section class="panel"><h2>Offline PCAP Protocol Distribution</h2><div class="chart-container"><canvas id="protocolChart"></canvas></div></section>
+    <section class="panel" id="offline-packets">
+        <h2>Offline Captured Packets <small>(click a row to inspect)</small></h2>
+        <div class="filters">
+            <select id="protocolFilter" aria-label="Filter by protocol"><option value="">All Protocols</option>{% for protocol in protocol_counts.keys() %}<option value="{{ protocol }}">{{ protocol }}</option>{% endfor %}</select>
+            <input id="sourceFilter" placeholder="Filter source IP..." aria-label="Filter source IP">
+            <input id="destinationFilter" placeholder="Filter destination IP..." aria-label="Filter destination IP">
+        </div>
+        <input id="searchInput" placeholder="Search all packet fields..." aria-label="Search packets">
+        <div class="toolbar"><a class="export-link" href="{{ url_for('export_csv') }}">Download Packet CSV</a><a class="export-link" href="{{ url_for('export_analysis_report') }}">Download Analysis Report (HTML)</a><button type="button" id="resetFilters" class="reset-button">Reset Filters</button></div>
+        <div class="table-wrapper"><table>
+            <thead><tr><th>No.</th><th>Timestamp</th><th>Source IP</th><th>Destination IP</th><th>Protocol</th><th>Source Port</th><th>Destination Port</th><th>Size (bytes)</th></tr></thead>
+            <tbody id="packetTable">{% for packet in packets %}<tr class="packet-row" data-source="offline" data-number="{{ packet.number }}" tabindex="0" title="Click to inspect this packet">
+                <td>{{ packet.number }}</td><td>{{ "%.6f"|format(packet.timestamp) }}</td><td>{{ packet.source_ip }}</td><td>{{ packet.destination_ip }}</td><td><span class="protocol">{{ packet.protocol }}</span></td><td>{{ packet.source_port }}</td><td>{{ packet.destination_port }}</td><td>{{ packet.size_bytes }}</td>
+            </tr>{% endfor %}</tbody>
+        </table></div><p id="resultCount">Showing {{ packets|length }} packets</p>
+    </section>
+</main>
+
+<div id="inspectionBackdrop" class="inspection-backdrop"></div>
+<aside id="inspectionPanel" class="inspection-panel" role="dialog" aria-modal="true" aria-labelledby="inspectionTitle" aria-hidden="true">
+    <div class="inspection-head">
+        <div><h2 id="inspectionTitle">Packet Inspector</h2><p id="inspectionSubtitle">Select a packet row to view details.</p></div>
+        <button id="closeInspection" type="button" aria-label="Close packet inspector" class="reset-button">✕</button>
+    </div>
+    <div class="inspection-actions">
+        <button type="button" id="copyRawHex">Copy raw hex</button>
+        <button type="button" id="copyPacketJson">Copy packet details JSON</button>
+    </div>
+    <div id="inspectionContent" class="inspection-content"><p class="inspection-loading">Click any offline or live packet row to inspect its layers and fields.</p></div>
+</aside>
+
+<script>
+const offlineData = {{ protocol_counts | tojson }};
+new Chart(document.getElementById("protocolChart"), {
+    type: "doughnut", data: { labels: Object.keys(offlineData), datasets: [{ label: "Offline packets", data: Object.values(offlineData) }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }
+});
+
+// Offline packet filters
+const offlineRows = [...document.querySelectorAll("#packetTable tr")];
+const searchInput = document.getElementById("searchInput");
+const protocolFilter = document.getElementById("protocolFilter");
+const sourceFilter = document.getElementById("sourceFilter");
+const destinationFilter = document.getElementById("destinationFilter");
+const resultCount = document.getElementById("resultCount");
+function filterOffline() {
+    let visible = 0;
+    const query = searchInput.value.toLowerCase().trim();
+    const protocol = protocolFilter.value.toLowerCase();
+    const source = sourceFilter.value.toLowerCase().trim();
+    const destination = destinationFilter.value.toLowerCase().trim();
+    offlineRows.forEach(row => {
+        const cells = row.cells;
+        const matches = row.textContent.toLowerCase().includes(query) &&
+            (!protocol || cells[4].textContent.trim().toLowerCase() === protocol) &&
+            cells[2].textContent.toLowerCase().includes(source) &&
+            cells[3].textContent.toLowerCase().includes(destination);
+        row.style.display = matches ? "" : "none";
+        if (matches) visible++;
+    });
+    resultCount.textContent = `Showing ${visible} of ${offlineRows.length} packets`;
+}
+[searchInput, protocolFilter, sourceFilter, destinationFilter].forEach(el => {
+    el.addEventListener("input", filterOffline); el.addEventListener("change", filterOffline);
+});
+document.getElementById("resetFilters").addEventListener("click", () => {
+    searchInput.value = ""; protocolFilter.value = ""; sourceFilter.value = ""; destinationFilter.value = ""; filterOffline();
+});
+filterOffline();
+
+// Packet inspector side panel
+const inspectionPanel = document.getElementById("inspectionPanel");
+const inspectionBackdrop = document.getElementById("inspectionBackdrop");
+const inspectionContent = document.getElementById("inspectionContent");
+const inspectionTitle = document.getElementById("inspectionTitle");
+const inspectionSubtitle = document.getElementById("inspectionSubtitle");
+let currentInspection = null;
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+}
+function openInspector() {
+    inspectionPanel.classList.add("open"); inspectionBackdrop.classList.add("open");
+    inspectionPanel.setAttribute("aria-hidden", "false"); document.body.style.overflow = "hidden";
+}
+function closeInspector() {
+    inspectionPanel.classList.remove("open"); inspectionBackdrop.classList.remove("open");
+    inspectionPanel.setAttribute("aria-hidden", "true"); document.body.style.overflow = "";
+    document.querySelectorAll(".packet-row.selected").forEach(row => row.classList.remove("selected"));
+}
+function prettyValue(value) {
+    if (value !== null && typeof value === "object") return JSON.stringify(value, null, 2);
+    return String(value ?? "None");
+}
+function renderInspector(data) {
+    currentInspection = data;
+    inspectionTitle.textContent = `${data.source === "live" ? "Live" : "Offline"} Packet #${data.number}`;
+    inspectionSubtitle.textContent = `${data.summary} · ${data.packet_length} bytes · ${data.timestamp_local}`;
+    const meta = data.metadata || {};
+    let html = `<h3>Packet overview</h3><div class="inspection-meta">
+        <div><strong>Capture source</strong><span>${escapeHtml(data.source)}</span></div>
+        <div><strong>Packet number</strong><span>${escapeHtml(data.number)}</span></div>
+        <div><strong>Timestamp</strong><span>${escapeHtml(data.timestamp_local)}</span></div>
+        <div><strong>Length</strong><span>${escapeHtml(data.packet_length)} bytes</span></div>
+        <div><strong>Source IP</strong><span>${escapeHtml(meta.source_ip)}</span></div>
+        <div><strong>Destination IP</strong><span>${escapeHtml(meta.destination_ip)}</span></div>
+        <div><strong>Protocol</strong><span>${escapeHtml(meta.protocol)}</span></div>
+        <div><strong>Ports</strong><span>${escapeHtml(meta.source_port)} → ${escapeHtml(meta.destination_port)}</span></div>
+    </div><h3>Decoded protocol layers and fields (${data.layers.length})</h3>`;
+    data.layers.forEach((layer, index) => {
+        html += `<details class="layer-card" ${index === 0 ? "open" : ""}><summary>${escapeHtml(index + 1)}. ${escapeHtml(layer.name)} <span style="font-weight:400">— ${escapeHtml(layer.length_bytes)} bytes</span></summary><div class="layer-body">`;
+        html += `<p><strong>Summary:</strong> ${escapeHtml(layer.summary)}</p>`;
+        const entries = Object.entries(layer.fields || {});
+        if (entries.length) {
+            html += `<table class="field-table"><tbody>`;
+            entries.forEach(([key, value]) => html += `<tr><th>${escapeHtml(key)}</th><td><pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere">${escapeHtml(prettyValue(value))}</pre></td></tr>`);
+            html += `</tbody></table>`;
+        } else html += `<p>No decoded fields exposed by this layer.</p>`;
+        html += `<details><summary>Raw bytes for ${escapeHtml(layer.name)}</summary><pre class="code-block">${escapeHtml(layer.raw_hex || "(empty)")}</pre></details></div></details>`;
+    });
+    html += `<h3>Full packet raw hexadecimal dump</h3><table class="hex-table"><tbody>`;
+    (data.hex_dump || []).forEach(line => html += `<tr><td>${escapeHtml(line.offset)}</td><td>${escapeHtml(line.hex)}</td><td>${escapeHtml(line.ascii)}</td></tr>`);
+    html += `</tbody></table><h3>Full raw hex (copyable)</h3><pre class="code-block">${escapeHtml(data.raw_hex || "(empty)")}</pre>`;
+    inspectionContent.innerHTML = html;
+}
+async function inspectPacket(source, number, row) {
+    openInspector();
+    document.querySelectorAll(".packet-row.selected").forEach(item => item.classList.remove("selected"));
+    if (row) row.classList.add("selected");
+    inspectionTitle.textContent = `Loading ${source} packet #${number}…`;
+    inspectionSubtitle.textContent = "Reading decoded protocol layers and raw bytes.";
+    inspectionContent.innerHTML = '<p class="inspection-loading">Loading packet details…</p>';
+    try {
+        const response = await fetch(`/api/packet-details?source=${encodeURIComponent(source)}&number=${encodeURIComponent(number)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        renderInspector(data);
+    } catch (error) {
+        currentInspection = null;
+        inspectionContent.innerHTML = `<p class="inspection-error">Could not inspect packet: ${escapeHtml(error.message)}</p>`;
+    }
+}
+document.getElementById("closeInspection").addEventListener("click", closeInspector);
+inspectionBackdrop.addEventListener("click", closeInspector);
+document.addEventListener("keydown", event => { if (event.key === "Escape") closeInspector(); });
+document.getElementById("copyRawHex").addEventListener("click", async () => {
+    if (!currentInspection) return;
+    try { await navigator.clipboard.writeText(currentInspection.raw_hex || ""); liveMessage.textContent = "Raw hexadecimal copied."; }
+    catch { liveMessage.textContent = "Clipboard access was blocked by the browser."; }
+});
+document.getElementById("copyPacketJson").addEventListener("click", async () => {
+    if (!currentInspection) return;
+    try { await navigator.clipboard.writeText(JSON.stringify(currentInspection, null, 2)); liveMessage.textContent = "Packet details JSON copied."; }
+    catch { liveMessage.textContent = "Clipboard access was blocked by the browser."; }
+});
+document.querySelectorAll('#packetTable tr[data-source="offline"]').forEach(row => {
+    row.addEventListener("click", () => inspectPacket("offline", row.dataset.number, row));
+    row.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); inspectPacket("offline", row.dataset.number, row); } });
+});
+
+// Live capture controls and rendering
+const liveStatus = document.getElementById("liveStatus");
+const liveMessage = document.getElementById("liveMessage");
+const liveCount = document.getElementById("liveCount");
+const liveBytes = document.getElementById("liveBytes");
+const liveProtocolCount = document.getElementById("liveProtocolCount");
+const liveTable = document.getElementById("livePacketTable");
+const interfaceSelect = document.getElementById("interfaceSelect");
+const startButton = document.getElementById("startCapture");
+const stopButton = document.getElementById("stopCapture");
+const refreshInterfacesButton = document.getElementById("refreshInterfaces");
+let liveChart = null, trafficChart = null, topSourceChart = null, topDestinationChart = null, topPortsChart = null;
+let refreshing = false, requestInProgress = false;
+function setRunning(running) {
+    startButton.disabled = running || requestInProgress;
+    stopButton.disabled = !running || requestInProgress;
+    interfaceSelect.disabled = running || requestInProgress;
+    refreshInterfacesButton.disabled = running || requestInProgress;
+    startButton.textContent = running ? "Capture Running" : "Start Capture";
+}
+async function api(url, options = {}) {
+    const response = await fetch(url, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    return data;
+}
+function renderLiveChart(counts) {
+    const labels = Object.keys(counts), values = Object.values(counts);
+    if (!liveChart) {
+        liveChart = new Chart(document.getElementById("liveChart"), {
+            type: "doughnut", data: { labels, datasets: [{ label: "Live packets", data: values }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }
+        });
+    } else {
+        liveChart.data.labels = labels; liveChart.data.datasets[0].data = values; liveChart.update("none");
+    }
+}
+function createOrUpdateBarChart(existingChart, canvasId, items, label) {
+    const labels = items.map(item => item.label);
+    const values = items.map(item => item.count);
+    if (!existingChart) {
+        return new Chart(document.getElementById(canvasId), {
+            type: "bar",
+            data: { labels, datasets: [{ label, data: values }] },
+            options: {
+                indexAxis: "y", responsive: true, maintainAspectRatio: false,
+                animation: false,
+                plugins: { legend: { display: false } },
+                scales: { x: { beginAtZero: true, ticks: { precision: 0 } } }
+            }
+        });
+    }
+    existingChart.data.labels = labels;
+    existingChart.data.datasets[0].data = values;
+    existingChart.update("none");
+    return existingChart;
+}
+function renderAnalytics(analytics) {
+    if (!analytics) return;
+    if (!trafficChart) {
+        trafficChart = new Chart(document.getElementById("trafficChart"), {
+            type: "line",
+            data: { labels: analytics.labels, datasets: [
+                { label: "Packets / second", data: analytics.packets_per_second, yAxisID: "y", tension: 0.25, pointRadius: 1 },
+                { label: "Bytes / second", data: analytics.bytes_per_second, yAxisID: "y1", tension: 0.25, pointRadius: 1 }
+            ] },
+            options: { responsive: true, maintainAspectRatio: false, animation: false,
+                interaction: { mode: "index", intersect: false },
+                scales: {
+                    y: { type: "linear", position: "left", beginAtZero: true, title: { display: true, text: "Packets / second" } },
+                    y1: { type: "linear", position: "right", beginAtZero: true, grid: { drawOnChartArea: false }, title: { display: true, text: "Bytes / second" } }
+                }
+            }
+        });
+    } else {
+        trafficChart.data.labels = analytics.labels;
+        trafficChart.data.datasets[0].data = analytics.packets_per_second;
+        trafficChart.data.datasets[1].data = analytics.bytes_per_second;
+        trafficChart.update("none");
+    }
+    topSourceChart = createOrUpdateBarChart(topSourceChart, "topSourceChart", analytics.top_source_ips || [], "Packets");
+    topDestinationChart = createOrUpdateBarChart(topDestinationChart, "topDestinationChart", analytics.top_destination_ips || [], "Packets");
+    topPortsChart = createOrUpdateBarChart(topPortsChart, "topPortsChart", analytics.top_ports || [], "Port observations");
+}
+function renderSecurityAlerts(alerts) {
+    const container = document.getElementById("securityAlerts");
+    container.replaceChildren();
+    if (!alerts || alerts.length === 0) {
+        const item = document.createElement("div");
+        item.className = "security-alert";
+        const message = document.createElement("p");
+        message.textContent = "No heuristic alerts in the latest 30 seconds. This does not guarantee that the network is safe.";
+        item.appendChild(message);
+        container.appendChild(item);
+        return;
+    }
+    alerts.forEach(alert => {
+        const item = document.createElement("div");
+        item.className = "security-alert " + (alert.severity === "warning" ? "warning" : "info");
+        const heading = document.createElement("h4");
+        heading.textContent = (alert.severity === "warning" ? "WARNING — " : "INFO — ") + alert.title;
+        const message = document.createElement("p");
+        message.textContent = alert.message;
+        const meta = document.createElement("p");
+        meta.className = "alert-meta";
+        meta.textContent = "Heuristic alert · " + new Date(Number(alert.timestamp) * 1000).toLocaleTimeString();
+        item.append(heading, message, meta);
+        container.appendChild(item);
+    });
+}
+
+function renderLiveTable(packets) {
+    liveTable.replaceChildren();
+    if (!packets.length) {
+        const row = document.createElement("tr"), cell = document.createElement("td");
+        cell.colSpan = 7; cell.textContent = "No live packets captured yet."; row.appendChild(cell); liveTable.appendChild(row); return;
+    }
+    packets.slice(-50).reverse().forEach(packet => {
+        const row = document.createElement("tr"); row.className = "packet-row"; row.dataset.source = "live"; row.dataset.number = packet.number; row.tabIndex = 0; row.title = "Click to inspect this packet";
+        [packet.number, packet.source_ip, packet.destination_ip, packet.protocol, packet.source_port, packet.destination_port, packet.size_bytes].forEach(value => {
+            const cell = document.createElement("td"); cell.textContent = String(value); row.appendChild(cell);
+        });
+        row.addEventListener("click", () => inspectPacket("live", row.dataset.number, row));
+        row.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); inspectPacket("live", row.dataset.number, row); } });
+        liveTable.appendChild(row);
+    });
+}
+async function refreshLive() {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+        const data = await api("/api/live/status");
+        setRunning(data.running);
+        if (data.running) liveStatus.textContent = "Status: Capturing on " + data.interface;
+        else if (data.error) { liveStatus.textContent = "Status: Capture error"; liveMessage.textContent = data.error; }
+        else if (!liveStatus.textContent.startsWith("Status: Start failed")) liveStatus.textContent = "Status: Stopped";
+        liveCount.textContent = Number(data.total_packets).toLocaleString();
+        liveBytes.textContent = Number(data.total_bytes).toLocaleString();
+        liveProtocolCount.textContent = Object.keys(data.protocol_counts).length;
+        renderLiveChart(data.protocol_counts);
+        renderAnalytics(data.analytics);
+        renderSecurityAlerts(data.security_alerts || []);
+        renderLiveTable(data.recent_packets);
+    } catch (error) {
+        liveStatus.textContent = "Status: Service unavailable"; liveMessage.textContent = error.message;
+    } finally { refreshing = false; }
+}
+startButton.addEventListener("click", async () => {
+    requestInProgress = true; setRunning(false);
+    liveStatus.textContent = "Status: Starting capture..."; liveMessage.textContent = "Opening the selected network interface...";
+    try {
+        const data = await api("/api/live/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ interface: interfaceSelect.value }) });
+        liveStatus.textContent = "Status: Capturing"; liveMessage.textContent = data.message || "Waiting for packets...";
+    } catch (error) { liveStatus.textContent = "Status: Start failed"; liveMessage.textContent = error.message; }
+    finally { requestInProgress = false; await refreshLive(); }
+});
+stopButton.addEventListener("click", async () => {
+    requestInProgress = true; setRunning(true); liveStatus.textContent = "Status: Stopping...";
+    try { const data = await api("/api/live/stop", { method: "POST" }); liveMessage.textContent = data.message || "Capture stopped."; }
+    catch (error) { liveMessage.textContent = error.message; }
+    finally { requestInProgress = false; await refreshLive(); }
+});
+refreshInterfacesButton.addEventListener("click", async () => {
+    const selected = interfaceSelect.value;
+    try {
+        const data = await api("/api/interfaces"); interfaceSelect.replaceChildren();
+        data.interfaces.forEach(item => {
+            const option = document.createElement("option"); option.value = item.name;
+            option.textContent = `${item.recommended ? "★ RECOMMENDED — " : ""}${item.windows_name} (${item.status}) — ${item.name}`;
+            interfaceSelect.appendChild(option);
+        });
+        interfaceSelect.value = data.interfaces.some(item => item.name === selected) ? selected : data.default_interface;
+        liveMessage.textContent = "Network interface list refreshed.";
+    } catch (error) { liveMessage.textContent = "Could not refresh interfaces: " + error.message; }
+});
+setRunning(false); refreshLive(); setInterval(refreshLive, 1000);
+</script>
+</body>
+</html>
